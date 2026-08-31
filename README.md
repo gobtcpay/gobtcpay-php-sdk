@@ -1,0 +1,366 @@
+# gobtcpay/php-merchant-sdk
+
+[![CI](https://github.com/gobtcpay/gobtcpay-php-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/gobtcpay/gobtcpay-php-sdk/actions/workflows/ci.yml)
+[![Packagist Version](https://img.shields.io/packagist/v/gobtcpay/php-merchant-sdk)](https://packagist.org/packages/gobtcpay/php-merchant-sdk)
+[![License](https://img.shields.io/packagist/l/gobtcpay/php-merchant-sdk)](./LICENSE)
+
+PHP client for the **GoBTC Pay API** — accept Bitcoin payments and track them
+until they settle on-chain. Two clients share one toolkit:
+
+- **`GoBTCPay`** — POS terminals. Every request is signed with a fresh
+  HMAC-SHA256 signature + timestamp (per-terminal key).
+- **`GoBTCPayServer`** — server-side shop integrations. Authenticates with the
+  merchant's secret key (`sk_live_…`): create a payment for an order, track it,
+  cancel it, reconcile.
+
+Both share webhook verification and payment polling helpers.
+
+## Requirements
+
+- PHP **8.1+**
+- A [PSR-18](https://www.php-fig.org/psr/psr-18/) HTTP client and
+  [PSR-17](https://www.php-fig.org/psr/psr-17/) factories. Install
+  [Guzzle](https://docs.guzzlephp.org/) and the SDK auto-discovers it — or pass
+  your own implementation.
+
+## Installation
+
+```bash
+composer require gobtcpay/php-merchant-sdk guzzlehttp/guzzle
+```
+
+`guzzlehttp/guzzle` is a suggestion, not a hard dependency: any PSR-18 client
+works. With Guzzle installed you don't need to wire anything up.
+
+> ⚠️ The POS `apiKey` and the server `sk_live_…` key are **secrets**. Keep them
+> server-side or on a controlled POS device. Never ship them to a browser.
+
+## Quick start
+
+### POS terminal (`GoBTCPay`)
+
+```php
+use GoBTCPay\PosApiSdk\GoBTCPay;
+
+$btcPay = new GoBTCPay(
+    apiKey: getenv('POS_API_KEY'),
+    posTerminalId: getenv('POS_TERMINAL_ID'),
+);
+
+// Create a payment and show the QR to the customer.
+$payment = $btcPay->createPayment(
+    amount: 10,
+    currency: 'USD',
+    description: 'Order #1024',
+);
+echo $payment->paymentId, PHP_EOL;
+echo $payment->qrString, PHP_EOL;
+
+// Fetch the current state.
+$latest = $btcPay->getPayment($payment->paymentId);
+echo $latest->status->value; // initiated | detected | paid | expired | canceled | failed | cleared
+```
+
+### Server-side shop (`GoBTCPayServer`)
+
+```php
+use GoBTCPay\PosApiSdk\GoBTCPayServer;
+
+$gobtcpay = new GoBTCPayServer(apiKey: getenv('GOBTCPAY_SECRET_KEY'));
+
+$payment = $gobtcpay->createPayment(
+    amount: 49.99,
+    currency: 'USD',
+    externalId: "order-{$order->id}", // makes create idempotent — pass it!
+);
+
+header('Location: ' . $payment->checkoutUrl);
+```
+
+### Bring your own HTTP client
+
+Any PSR-18 client + PSR-17 factories work. Pass them explicitly to skip
+auto-discovery (or to reuse a configured client):
+
+```php
+use GoBTCPay\PosApiSdk\GoBTCPayServer;
+use GuzzleHttp\Client;
+use GuzzleHttp\Psr7\HttpFactory;
+
+$factory = new HttpFactory();
+$gobtcpay = new GoBTCPayServer(
+    apiKey: getenv('GOBTCPAY_SECRET_KEY'),
+    httpClient: new Client(['timeout' => 30]),
+    requestFactory: $factory,
+    streamFactory: $factory,
+);
+```
+
+## Configuration
+
+### `GoBTCPay` (POS)
+
+| Option           | Required | Default                                       | Description                                     |
+| ---------------- | -------- | --------------------------------------------- | ----------------------------------------------- |
+| `apiKey`         | yes      | —                                             | Per-terminal secret used to sign every request. |
+| `posTerminalId`  | no       | —                                             | Default terminal for `createPayment`.           |
+| `baseUrl`        | no       | `https://api.gobtcpay.com/public/api/v1.1`    | Override for staging/dev environments.          |
+| `timeoutMs`      | no       | `30000`                                       | Per-request timeout.                            |
+| `httpClient`     | no       | auto-discovered Guzzle                        | Your PSR-18 client.                             |
+| `requestFactory` | no       | auto-discovered Guzzle/Nyholm                 | Your PSR-17 request factory.                    |
+| `streamFactory`  | no       | auto-discovered Guzzle/Nyholm                 | Your PSR-17 stream factory.                     |
+
+### `GoBTCPayServer`
+
+| Option           | Required | Default                                       | Description                                             |
+| ---------------- | -------- | --------------------------------------------- | ------------------------------------------------------- |
+| `apiKey`         | yes      | —                                             | Merchant secret key (`sk_live_…`). `pk_live_…` rejected.|
+| `baseUrl`        | no       | `https://api.gobtcpay.com/public/api/v1.2`    | Override for staging/dev environments.                  |
+| `timeoutMs`      | no       | `30000`                                       | Per-request timeout.                                    |
+| `maxRetries`     | no       | `2`                                           | Retries after the first attempt (network / 429 / 5xx).  |
+| `onEvent`        | no       | —                                             | `callable(array $event)` called once per attempt.       |
+| `httpClient` / `requestFactory` / `streamFactory` | no | auto-discovered | Same as above.                       |
+
+## Methods
+
+### `GoBTCPay`
+
+```php
+$btcPay->createPayment(amount, currency, posTerminalId?, description?, ttlSeconds?, externalId?): Payment;
+$btcPay->getPayment(paymentId): Payment;
+$btcPay->watchPayment(['paymentId' => ..., 'intervalMs' => ..., 'timeoutMs' => ..., 'until' => [...], 'immediate' => ..., 'stopOnError' => ...]): PaymentPoller;
+$btcPay->webhooks(signingSecret, toleranceSeconds?, dedupeCacheSize?): WebhookHandler;
+```
+
+### `GoBTCPayServer`
+
+```php
+$gobtcpay->createPayment(amount, currency, externalId?, description?, ttlSeconds?): Payment;
+$gobtcpay->getPayment(paymentId): Payment;
+$gobtcpay->cancelPayment(paymentId): Payment;
+$gobtcpay->listPayments(status?, externalId?, dateRange?, limit?): Generator<PaymentListItem>;
+$gobtcpay->listPaymentsPage(status?, externalId?, dateRange?, limit?, skip?): array{items: PaymentListItem[], totalCount: int};
+$gobtcpay->watchPayment([...]): PaymentPoller;
+$gobtcpay->webhooks(signingSecret, toleranceSeconds?, dedupeCacheSize?): WebhookHandler;
+```
+
+`listPayments()` is a generator that pages transparently, newest first:
+
+```php
+use GoBTCPay\PosApiSdk\Dto\PaymentStatus;
+
+foreach ($gobtcpay->listPayments(status: [PaymentStatus::Paid]) as $item) {
+    $this->reconcile($item);
+}
+```
+
+## Auto-polling
+
+`watchPayment()` returns a `PaymentPoller`. Because PHP request handlers are
+synchronous, `poll()` is a **blocking** loop: it calls `getPayment` on an
+interval until the payment reaches a final status (`paid` / `cleared` /
+`expired` / `canceled` / `failed`). The interval defaults to and is clamped to a
+minimum of **3 seconds**.
+
+```php
+$poller = $btcPay->watchPayment(['paymentId' => $payment->paymentId, 'intervalMs' => 3000]);
+
+$poller->onChange(fn ($status) => render($status));   // any status change
+$poller->onUpdate(fn ($payment) => {});               // every successful poll
+$poller->onPaid(fn ($payment) => {});                 // transition into `paid`
+$poller->onSettled(fn ($payment) => {});              // reached a final status
+$poller->onError(fn ($error) => {});                  // a poll failed
+
+$final = $poller->poll(); // blocks, returns the settled Payment
+```
+
+Options (array keys): `paymentId` (required), `intervalMs`, `timeoutMs`,
+`immediate` (default `true`), `until` (list of `PaymentStatus`), `stopOnError`.
+
+> **`paid` vs `cleared`:** `paid` means the funds are confirmed on-chain — the
+> terminal success state for external wallet payments. To stop as soon as that
+> happens, pass `'until' => [PaymentStatus::Paid]`, or react to `onPaid` while
+> polling continues.
+
+## Webhooks
+
+Register a webhook URL in the merchant dashboard to receive
+`payment.status.updated` events. The handler verifies the `X-GoBTCPay-Signature`
+header (`t={timestamp},v1={hmac_hex}`), enforces a replay window, and
+de-duplicates on `eventId`.
+
+```php
+$webhooks = $gobtcpay->webhooks(getenv('POS_WEBHOOK_SECRET'));
+
+$webhooks->on('payment.status.updated', function ($event) {
+    $payment = $event->payment();            // typed Payment
+    // $event->data is also the raw decoded array
+    error_log("{$payment->paymentId} -> {$payment->status->value}");
+});
+```
+
+`handle()` returns the parsed `WebhookEvent`, or `null` if it was a duplicate.
+Use `constructEvent()` to only verify + parse without dispatching. **Always feed
+the raw request body** — do not decode and re-encode it, or the signature will
+not match.
+
+### Plain PHP
+
+```php
+$rawBody = file_get_contents('php://input');
+$signature = $_SERVER['HTTP_X_GOBTCPAY_SIGNATURE'] ?? null;
+
+try {
+    $webhooks->handle($rawBody, $signature);
+    http_response_code(200); // any 2xx acknowledges; non-2xx is retried
+} catch (\GoBTCPay\PosApiSdk\Exception\WebhookSignatureException) {
+    http_response_code(400);
+}
+```
+
+### Laravel
+
+```php
+use Illuminate\Http\Request;
+
+Route::post('/webhooks/gobtcpay', function (Request $request) use ($webhooks) {
+    try {
+        $webhooks->handle(
+            $request->getContent(), // RAW body
+            $request->header('X-GoBTCPay-Signature'),
+        );
+        return response()->noContent(); // 204
+    } catch (\GoBTCPay\PosApiSdk\Exception\WebhookSignatureException) {
+        return response('invalid signature', 400);
+    }
+});
+```
+
+### Symfony
+
+```php
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\Response;
+
+#[Route('/webhooks/gobtcpay', methods: ['POST'])]
+public function gobtcpay(Request $request): Response
+{
+    try {
+        $this->webhooks->handle(
+            $request->getContent(), // RAW body
+            $request->headers->get('X-GoBTCPay-Signature'),
+        );
+        return new Response('', Response::HTTP_NO_CONTENT);
+    } catch (\GoBTCPay\PosApiSdk\Exception\WebhookSignatureException) {
+        return new Response('invalid signature', Response::HTTP_BAD_REQUEST);
+    }
+}
+```
+
+## Error handling
+
+Every error extends `GoBTCPay\PosApiSdk\Exception\GoBTCPayException`:
+
+| Exception                   | When                                                     |
+| --------------------------- | -------------------------------------------------------- |
+| `ApiException`              | Any API error envelope / non-2xx (`->httpStatus`, `->body`, `->requestId`, `->type()`). Base for the ones below. |
+| `AuthException`             | 401 / 403 — key missing, malformed, revoked, not permitted. |
+| `ValidationException`       | 400 / 402 — request rejected; retrying unchanged won't help. |
+| `NotFoundException`         | 404 — no such payment.                                   |
+| `RateLimitException`        | 429 — too many requests (`->retryAfterMs`).              |
+| `ServerException`           | 5xx — the API failed; safe to retry idempotent calls.    |
+| `NetworkException`          | No response: connection / DNS / TLS / timeout (`->isTimeout`). |
+| `WebhookSignatureException` | A webhook signature failed verification.                 |
+
+```php
+use GoBTCPay\PosApiSdk\Exception\ApiException;
+use GoBTCPay\PosApiSdk\Exception\NetworkException;
+use GoBTCPay\PosApiSdk\Exception\RateLimitException;
+
+try {
+    $payment = $gobtcpay->createPayment(amount: 10, currency: 'USD', externalId: 'order-1');
+} catch (RateLimitException $e) {
+    // back off for $e->retryAfterMs
+} catch (ApiException $e) {
+    error_log("API {$e->httpStatus} ({$e->requestId}): {$e->getMessage()}");
+} catch (NetworkException $e) {
+    // connection failure / timeout ($e->isTimeout)
+}
+```
+
+The server client retries network failures, `429` and `5xx` automatically
+(`maxRetries`, default 2) with exponential backoff + jitter. Reads and
+idempotent `create` calls (those with an `externalId`) are retried; a
+`create` without an `externalId` is not, so a retry can't double-charge. The
+POS client does not retry — a human at the terminal sees the failure and taps
+again.
+
+## Development
+
+```bash
+composer install
+composer lint       # php-cs-fixer --dry-run --diff
+composer lint:fix   # apply fixes
+composer phpstan    # static analysis (level 8)
+composer test       # PHPUnit unit suite
+```
+
+### Docker
+
+A `Dockerfile` is included so that all checks run in an identical environment
+locally and in CI:
+
+```bash
+docker build -t gobtcpay-php-sdk .
+docker run --rm gobtcpay-php-sdk sh -c 'composer install && composer test && composer phpstan && composer lint'
+```
+
+CI builds this image per pipeline and runs `lint`, `phpstan`, and `test` jobs
+against it.
+
+### Testing
+
+**Unit tests** — pure logic, no network. They gate every MR and run in CI:
+request signing (HMAC cross-checked against `hash_hmac`), the envelope
+transport (retries, typed exceptions), webhook verification (signature / replay
+window / de-dup), and the poller lifecycle.
+
+```bash
+composer test
+composer test:coverage
+```
+
+**Integration tests** — exercise the SDK end-to-end against a live POS API on
+the **test contour**. Opt-in and self-skipping unless credentials are present:
+
+```bash
+cp .env.example .env   # fill in test-contour values, then:
+POS_API_KEY=... POS_TERMINAL_ID=... composer test:integration
+```
+
+Use **test-contour** credentials only — never a production key.
+
+## Versioning
+
+The **API version is pinned inside each client** (POS `v1.1`, server `v1.2`),
+exported as `GoBTCPay::API_VERSION` / `GoBTCPayServer::SERVER_API_VERSION` — you
+don't put it in a URL. Need a different version or environment? Override
+`baseUrl`.
+
+## Publishing
+
+The `release` GitHub Actions job runs
+[semantic-release](https://semantic-release.gitbook.io/) on the default
+branch and creates a GitHub release + tag from Conventional Commits.
+
+Distribution is through the public [Packagist](https://packagist.org/)
+(`gobtcpay/php-merchant-sdk`), backed by a GitHub webhook that Packagist sets
+up automatically once the repository is connected — every new release tag
+becomes an installable version with no extra publish step.
+
+## License
+
+**MIT** — see [LICENSE](./LICENSE). You may freely use, copy, modify, merge,
+publish, distribute, sublicense, and sell the software, including in
+closed-source and commercial products. Keep the copyright notice and license
+text in copies. Provided "as is", without warranty.

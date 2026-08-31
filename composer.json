@@ -1,0 +1,63 @@
+{
+    "name": "gobtcpay/php-merchant-sdk",
+    "description": "PHP client for the GoBTC Pay POS & merchant API — create Bitcoin payments, verify webhooks, and poll for settlement.",
+    "type": "library",
+    "license": "MIT",
+    "keywords": ["gobtcpay", "bitcoin", "payments", "pos", "sdk", "webhooks"],
+    "homepage": "https://gobtcpay.com",
+    "support": {
+        "issues": "https://github.com/gobtcpay/gobtcpay-php-sdk/issues",
+        "source": "https://github.com/gobtcpay/gobtcpay-php-sdk"
+    },
+    "authors": [
+        {
+            "name": "GoMining",
+            "homepage": "https://gomining.com"
+        }
+    ],
+    "require": {
+        "php": "^8.1",
+        "ext-json": "*",
+        "psr/http-client": "^1.0",
+        "psr/http-factory": "^1.0",
+        "psr/http-message": "^1.1 || ^2.0"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^10.0",
+        "phpstan/phpstan": "^1.10",
+        "friendsofphp/php-cs-fixer": "^3.0",
+        "guzzlehttp/guzzle": "^7.0",
+        "php-http/mock-client": "^1.0",
+        "nyholm/psr7": "^1.8"
+    },
+    "suggest": {
+        "guzzlehttp/guzzle": "Default PSR-18 HTTP client, auto-discovered when installed (^7.0).",
+        "nyholm/psr7": "Lightweight PSR-17 request/stream factories (^1.8)."
+    },
+    "autoload": {
+        "psr-4": {
+            "GoBTCPay\\PosApiSdk\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "GoBTCPay\\PosApiSdk\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "lint": "php-cs-fixer fix --dry-run --diff",
+        "lint:fix": "php-cs-fixer fix",
+        "phpstan": "phpstan analyse",
+        "test": "phpunit --testsuite unit",
+        "test:integration": "phpunit --testsuite integration",
+        "test:coverage": "phpunit --testsuite unit --coverage-text --coverage-cobertura coverage/cobertura-coverage.xml"
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "php-http/discovery": true
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}

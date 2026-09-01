@@ -1,3 +1,10 @@
+## [1.0.1](https://github.com/gobtcpay/gobtcpay-php-sdk/compare/v1.0.0...v1.0.1) (2026-09-01)
+
+
+### Bug Fixes
+
+* restore webhook endpoint management and payment settlement fields ([fef6452](https://github.com/gobtcpay/gobtcpay-php-sdk/commit/fef64522a306eb5e3732ddcc839c6e6ee4d67fbd))
+
 # 1.0.0 (2026-08-31)
 
 

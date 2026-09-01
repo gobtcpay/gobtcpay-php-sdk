@@ -30,7 +30,7 @@ final class GoBTCPayServer
     public const SERVER_API_VERSION = 'v1.2';
 
     /** Bumped by the release pipeline; sent as the User-Agent for support triage. */
-    public const SDK_VERSION = '1.0.0';
+    public const SDK_VERSION = '1.0.1';
 
     private const DEFAULT_HOST = 'https://api.gobtcpay.com/public/api';
     private const DEFAULT_TIMEOUT_MS = 30_000;

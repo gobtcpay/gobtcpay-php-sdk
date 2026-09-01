@@ -2,7 +2,7 @@
 
 /**
  * Create a POS payment and print the QR string to present to the payer, then
- * poll until it settles.
+ * poll until the poller stops.
  *
  * Usage:
  *   composer install

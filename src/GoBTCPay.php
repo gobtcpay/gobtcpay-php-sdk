@@ -122,7 +122,8 @@ final class GoBTCPay
 
     /**
      * Build a poller that calls {@see getPayment} on an interval until the
-     * payment reaches a final status. Call `->poll()` to block until it settles.
+     * payment reaches one of the statuses it stops at. Call `->poll()` to block
+     * until then.
      *
      * @param array<string, mixed> $options See {@see PaymentPoller}. Must include `paymentId`.
      */

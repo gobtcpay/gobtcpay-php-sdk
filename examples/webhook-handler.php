@@ -30,6 +30,16 @@ $webhooks = new WebhookHandler($secret);
 
 // Register listeners once; they run for every non-duplicate delivery.
 $webhooks->on(WebhookEvent::TYPE_PAYMENT_STATUS_UPDATED, function (WebhookEvent $event): void {
+    // A test delivery is signed and well-formed but carries no payment — it is
+    // what `testWebhook()` sends. Acknowledge it and stop; calling payment()
+    // here would throw, the endpoint would answer 500, and the platform would
+    // retry a delivery that was only ever a connectivity check.
+    if (!$event->hasPaymentData()) {
+        error_log('test delivery received');
+
+        return;
+    }
+
     $payment = $event->payment();
     // Compare $payment->version against the last one you stored before applying
     // this update — webhook deliveries are retried and therefore unordered.

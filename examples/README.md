@@ -13,7 +13,7 @@ in **test-contour** credentials — never a production key.
 
 ## `create-payment.php`
 
-Creates a POS payment, prints the QR string, and polls until it settles.
+Creates a POS payment, prints the QR string, and polls until the poller stops.
 
 ```bash
 POS_API_KEY=... POS_TERMINAL_ID=... php examples/create-payment.php
@@ -24,7 +24,9 @@ Optional: `POS_API_BASE_URL` to point at a non-default environment.
 ## `webhook-handler.php`
 
 A plain-PHP webhook endpoint that verifies the `X-GoBTCPay-Signature` header,
-de-duplicates on `eventId`, and dispatches `payment.status.updated` events.
+de-duplicates on `eventId`, and dispatches `payment.status.updated` events. It
+guards on `hasPaymentData()` first, because a test delivery arrives through the
+same listener with no payment behind it.
 
 Local smoke test with PHP's built-in server:
 

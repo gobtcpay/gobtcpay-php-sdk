@@ -30,7 +30,25 @@ enum PaymentStatus: string
     case Cleared = 'cleared';
 
     /**
-     * Statuses at which polling stops by default.
+     * The set at which {@see \GoBTCPay\PosApiSdk\PaymentPoller} gives up by
+     * default — "no longer worth polling", which is NOT the same as "the
+     * outcome is decided".
+     *
+     * Two members of this set are not terminal on the server:
+     *
+     * - `Expired` never is. The payment window closing does not close the
+     *   payment: funds arriving within the grace period still move it to
+     *   `Paid` hours later. Cancelling an order here is irreversible and the
+     *   money may still arrive.
+     * - `Paid` is terminal as a status, but on a server older than the
+     *   settlement-notification fix it can be reached before settlement is
+     *   recorded: `paidAt` was filled in afterwards without bumping `version`
+     *   and without emitting an event, so a consumer that stopped polling here
+     *   never learned the payment had settled.
+     *
+     * Use this set when you mean "stop spending requests". When you mean "the
+     * outcome is decided", decide it yourself from the status and
+     * {@see Payment::$paidAt} rather than from this list.
      *
      * @return list<self>
      */
@@ -39,7 +57,12 @@ enum PaymentStatus: string
         return [self::Paid, self::Cleared, self::Expired, self::Canceled, self::Failed];
     }
 
-    /** Whether this status is one of the default final (terminal) statuses. */
+    /**
+     * Whether this status is in {@see finalStatuses} — the polling stop set.
+     *
+     * Read its documentation before branching on this: `true` here does not
+     * mean the payment can no longer change.
+     */
     public function isFinal(): bool
     {
         return in_array($this, self::finalStatuses(), true);

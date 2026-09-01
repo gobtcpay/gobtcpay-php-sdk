@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace GoBTCPay\PosApiSdk\Tests\Unit;
 
 use GoBTCPay\PosApiSdk\Dto\WebhookEvent;
+use GoBTCPay\PosApiSdk\Exception\GoBTCPayException;
 use GoBTCPay\PosApiSdk\Exception\WebhookSignatureException;
 use GoBTCPay\PosApiSdk\Signing;
 use GoBTCPay\PosApiSdk\WebhookHandler;
@@ -21,6 +22,21 @@ final class WebhookHandlerTest extends TestCase
             'type' => WebhookEvent::TYPE_PAYMENT_STATUS_UPDATED,
             'createdAt' => 1_700_000_000,
             'data' => ['paymentId' => 'pay_1', 'status' => $status],
+        ], JSON_THROW_ON_ERROR);
+    }
+
+    /**
+     * The body of a test delivery, exactly as the platform queues it: correctly
+     * signed, same envelope, `data: null`, `test: true`.
+     */
+    private function testDeliveryBody(string $eventId = 'evt_test'): string
+    {
+        return json_encode([
+            'eventId' => $eventId,
+            'type' => WebhookEvent::TYPE_PAYMENT_STATUS_UPDATED,
+            'createdAt' => 1_700_000_000,
+            'test' => true,
+            'data' => null,
         ], JSON_THROW_ON_ERROR);
     }
 
@@ -153,5 +169,59 @@ final class WebhookHandlerTest extends TestCase
         // 'c' is still cached, so it de-dupes to null.
         $bc = $this->body(eventId: 'c');
         self::assertNull($handler->handle($bc, $this->header($bc)));
+    }
+
+    /**
+     * A test delivery is a normal, signed delivery and must reach the listener.
+     * It is the only evidence a "test my webhook" button ever gets — the API
+     * response to `testWebhook()` only says the delivery was queued.
+     */
+    public function testTestDeliveryIsVerifiedAndDispatched(): void
+    {
+        $handler = new WebhookHandler(self::SECRET);
+        $body = $this->testDeliveryBody();
+
+        $seen = null;
+        $handler->on(WebhookEvent::TYPE_PAYMENT_STATUS_UPDATED, function (WebhookEvent $event) use (&$seen): void {
+            $seen = $event;
+        });
+
+        $event = $handler->handle($body, $this->header($body));
+
+        self::assertInstanceOf(WebhookEvent::class, $event);
+        self::assertSame($event, $seen);
+        self::assertTrue($event->test);
+        self::assertFalse($event->hasPaymentData());
+    }
+
+    /**
+     * And it must not blow the listener up. `data: null` carries no payment, so
+     * `payment()` refuses with a typed SDK exception — never a raw \ValueError
+     * out of the enum, which no documented `catch` block would have caught and
+     * which would 500 the shop's endpoint into eight delivery retries.
+     */
+    public function testPaymentOnATestDeliveryThrowsATypedException(): void
+    {
+        $handler = new WebhookHandler(self::SECRET);
+        $body = $this->testDeliveryBody();
+
+        $event = $handler->constructEvent($body, $this->header($body));
+
+        $this->expectException(GoBTCPayException::class);
+        $this->expectExceptionMessage('test delivery');
+        $event->payment();
+    }
+
+    /** A real delivery is unaffected: `test` is false and the payment parses. */
+    public function testRealDeliveryStillCarriesItsPayment(): void
+    {
+        $handler = new WebhookHandler(self::SECRET);
+        $body = $this->body();
+
+        $event = $handler->constructEvent($body, $this->header($body));
+
+        self::assertFalse($event->test);
+        self::assertTrue($event->hasPaymentData());
+        self::assertSame('pay_1', $event->payment()->paymentId);
     }
 }

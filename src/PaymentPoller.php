@@ -9,11 +9,12 @@ use GoBTCPay\PosApiSdk\Dto\PaymentStatus;
 use GoBTCPay\PosApiSdk\Exception\GoBTCPayException;
 
 /**
- * Polls a fetcher on an interval until a payment reaches a final status.
+ * Polls a fetcher on an interval until a payment reaches one of the statuses
+ * it stops at.
  *
  * PHP request handlers are synchronous, so {@see poll} is a blocking loop: it
  * calls the fetcher, fires callbacks, sleeps for the interval, and repeats until
- * the payment settles (or a timeout / error stops it). Subscribe with
+ * it stops (or a timeout / error stops it). Subscribe with
  * {@see onChange} / {@see onUpdate} / {@see onPaid} / {@see onSettled} /
  * {@see onError}.
  *
@@ -108,7 +109,15 @@ class PaymentPoller
         return $this;
     }
 
-    /** Subscribe to the terminal (final) state. */
+    /**
+     * Subscribe to the status the poller stops at.
+     *
+     * Stopping is not the same as the outcome being decided: with the default
+     * stop set this fires for `expired` too, and `expired` is NOT terminal on
+     * the server — funds arriving within the grace period still move the
+     * payment to `paid` afterwards. Do not close an order irreversibly from
+     * here without checking the status you were handed.
+     */
     public function onSettled(callable $listener): self
     {
         $this->settledListeners[] = $listener;

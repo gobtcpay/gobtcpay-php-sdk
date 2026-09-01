@@ -8,6 +8,7 @@ use Generator;
 use GoBTCPay\PosApiSdk\Dto\Payment;
 use GoBTCPay\PosApiSdk\Dto\PaymentListItem;
 use GoBTCPay\PosApiSdk\Dto\PaymentStatus;
+use GoBTCPay\PosApiSdk\Dto\WebhookEndpoint;
 use GoBTCPay\PosApiSdk\Exception\GoBTCPayException;
 use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestFactoryInterface;
@@ -232,7 +233,8 @@ final class GoBTCPayServer
 
     /**
      * Build a poller that calls {@see getPayment} on an interval until the
-     * payment reaches a final status. Call `->poll()` to block until it settles.
+     * payment reaches one of the statuses it stops at. Call `->poll()` to block
+     * until then.
      *
      * @param array<string, mixed> $options See {@see PaymentPoller}. Must include `paymentId`.
      */
@@ -240,6 +242,100 @@ final class GoBTCPayServer
     {
         /** @var array{paymentId: string} $options */
         return new PaymentPoller(fn (string $id): Payment => $this->getPayment($id), $options);
+    }
+
+    /**
+     * List the merchant's configured webhook endpoints.
+     *
+     * Read-only, and an empty list is a perfectly successful answer: a merchant
+     * that has registered nothing yet is not an error. That makes this the
+     * cheapest probe of whether an API key can manage webhooks at all —
+     * endpoints are merchant-level configuration, so a key restricted to one
+     * store is refused.
+     *
+     * **A refusal does not say why.** The platform answers HTTP 403
+     * ({@see \GoBTCPay\PosApiSdk\Exception\AuthException}) with the same
+     * `permission_error` for a store-scoped key, a revoked key, an unknown key,
+     * a publishable key and an inactive merchant. Report the server's own
+     * message; do not infer the cause from the status code.
+     *
+     * **Returns one page.** Compare `count($result['items'])` against
+     * `totalCount` and page with `$skip` before concluding that a particular
+     * URL is not registered — on a merchant with more endpoints than `$limit`,
+     * a missing entry may simply be on the next page.
+     *
+     * @param string|null $status Filter by `WebhookEndpoint::STATUS_*`; null for both.
+     *
+     * @return array{items: list<WebhookEndpoint>, totalCount: int}
+     */
+    public function listWebhooks(
+        ?string $status = null,
+        int $limit = self::DEFAULT_PAGE_SIZE,
+        int $skip = 0,
+    ): array {
+        $filters = array_filter(
+            ['status' => $status],
+            static fn (mixed $v): bool => $v !== null,
+        );
+
+        $response = $this->transport->post(
+            '/merchant/webhook/list',
+            [
+                'pagination' => [
+                    'limit' => min($limit, self::MAX_PAGE_SIZE),
+                    'skip' => $skip,
+                ],
+                'filters' => (object) $filters,
+            ],
+            retry: true,
+        );
+
+        $items = [];
+        foreach ((array) ($response['items'] ?? []) as $item) {
+            if (is_array($item)) {
+                /** @var array<string, mixed> $item */
+                $items[] = WebhookEndpoint::fromArray($item);
+            }
+        }
+
+        return [
+            'items' => $items,
+            'totalCount' => (int) ($response['totalCount'] ?? 0),
+        ];
+    }
+
+    /**
+     * Ask the platform to send a test delivery to one of your endpoints.
+     *
+     * **Returning normally means the delivery was queued, not that it arrived.**
+     * Deliveries are dispatched by a scheduled job, so the test lands at your
+     * endpoint some time after this call returns, and it can still fail there —
+     * an unreachable URL, a TLS error, a non-2xx response. Whether the webhook
+     * actually works is answered at the receiving end, by observing the
+     * delivery; it is not answered by this method.
+     *
+     * That is also why nothing is returned. A boolean here would read as "the
+     * webhook works", which is the one thing this call cannot tell you.
+     *
+     * Refused for a store-scoped API key, like every webhook management call —
+     * with the same undifferentiated 403 as {@see listWebhooks}.
+     *
+     * @throws GoBTCPayException If the platform declines to queue the delivery.
+     */
+    public function testWebhook(string $webhookId): void
+    {
+        // Not retried: a repeat would queue a second delivery, and there is no
+        // idempotency key for this call. A timeout leaves the outcome unknown,
+        // which is the honest answer — the receiving end settles it.
+        $response = $this->transport->post(
+            '/merchant/webhook/test',
+            ['webhookId' => $webhookId],
+            retry: false,
+        );
+
+        if (($response['ok'] ?? false) !== true) {
+            throw new GoBTCPayException('The platform did not queue the test delivery');
+        }
     }
 
     /** Create a handler that verifies and dispatches webhook deliveries. */

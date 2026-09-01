@@ -141,6 +141,8 @@ $gobtcpay->cancelPayment(paymentId): Payment;
 $gobtcpay->listPayments(status?, externalId?, dateRange?, limit?): Generator<PaymentListItem>;
 $gobtcpay->listPaymentsPage(status?, externalId?, dateRange?, limit?, skip?): array{items: PaymentListItem[], totalCount: int};
 $gobtcpay->watchPayment([...]): PaymentPoller;
+$gobtcpay->listWebhooks(status?, limit?, skip?): array{items: WebhookEndpoint[], totalCount: int};
+$gobtcpay->testWebhook(webhookId): void;
 $gobtcpay->webhooks(signingSecret, toleranceSeconds?, dedupeCacheSize?): WebhookHandler;
 ```
 
@@ -158,9 +160,9 @@ foreach ($gobtcpay->listPayments(status: [PaymentStatus::Paid]) as $item) {
 
 `watchPayment()` returns a `PaymentPoller`. Because PHP request handlers are
 synchronous, `poll()` is a **blocking** loop: it calls `getPayment` on an
-interval until the payment reaches a final status (`paid` / `cleared` /
-`expired` / `canceled` / `failed`). The interval defaults to and is clamped to a
-minimum of **3 seconds**.
+interval until the payment reaches one of the statuses it stops at (`paid` /
+`cleared` / `expired` / `canceled` / `failed`). The interval defaults to and is
+clamped to a minimum of **3 seconds**.
 
 ```php
 $poller = $btcPay->watchPayment(['paymentId' => $payment->paymentId, 'intervalMs' => 3000]);
@@ -168,7 +170,7 @@ $poller = $btcPay->watchPayment(['paymentId' => $payment->paymentId, 'intervalMs
 $poller->onChange(fn ($status) => render($status));   // any status change
 $poller->onUpdate(fn ($payment) => {});               // every successful poll
 $poller->onPaid(fn ($payment) => {});                 // transition into `paid`
-$poller->onSettled(fn ($payment) => {});              // reached a final status
+$poller->onSettled(fn ($payment) => {});              // the poller stopped (see the note below)
 $poller->onError(fn ($error) => {});                  // a poll failed
 
 $final = $poller->poll(); // blocks, returns the settled Payment
@@ -178,9 +180,18 @@ Options (array keys): `paymentId` (required), `intervalMs`, `timeoutMs`,
 `immediate` (default `true`), `until` (list of `PaymentStatus`), `stopOnError`.
 
 > **`paid` vs `cleared`:** `paid` means the funds are confirmed on-chain — the
-> terminal success state for external wallet payments. To stop as soon as that
+> success state for external wallet payments. To stop as soon as that
 > happens, pass `'until' => [PaymentStatus::Paid]`, or react to `onPaid` while
 > polling continues.
+
+> **Stopping is not the same as deciding.** The default stop set is "no longer
+> worth polling", not "nothing can change". `expired` in particular is **not
+> terminal on the server**: the window closing does not close the payment, and
+> funds arriving within the grace period still move it to `paid` afterwards — so
+> cancelling an order on `expired` can strand a payment that later succeeds.
+> When your decision is irreversible, read `$payment->paidAt` (settlement time,
+> `null` until the payment settles) and `$payment->transactions` rather than
+> `PaymentStatus::isFinal()`.
 
 ## Webhooks
 
@@ -193,16 +204,59 @@ de-duplicates on `eventId`.
 $webhooks = $gobtcpay->webhooks(getenv('POS_WEBHOOK_SECRET'));
 
 $webhooks->on('payment.status.updated', function ($event) {
+    if (!$event->hasPaymentData()) {
+        return;                              // a test delivery — nothing to update
+    }
+
     $payment = $event->payment();            // typed Payment
     // $event->data is also the raw decoded array
     error_log("{$payment->paymentId} -> {$payment->status->value}");
 });
 ```
 
+**Guard on `hasPaymentData()`.** A test delivery (see below) arrives correctly
+signed, through the same listener, with no payment behind it — `$event->test` is
+`true` and `$event->data` is empty. Calling `payment()` on one throws a
+`GoBTCPayException`; answering 2xx anyway is the right behaviour, and it is what
+tells the sender the endpoint works.
+
 `handle()` returns the parsed `WebhookEvent`, or `null` if it was a duplicate.
 Use `constructEvent()` to only verify + parse without dispatching. **Always feed
 the raw request body** — do not decode and re-encode it, or the signature will
 not match.
+
+### Inspecting and testing endpoints
+
+`listWebhooks()` returns the endpoints configured for the merchant, and
+`testWebhook()` asks the platform to send a test delivery to one of them:
+
+```php
+foreach ($gobtcpay->listWebhooks()['items'] as $endpoint) {
+    echo $endpoint->url, ' ', $endpoint->status, PHP_EOL;
+}
+
+$gobtcpay->testWebhook($endpointId);
+```
+
+The test delivery is a normal signed delivery of type `payment.status.updated`
+carrying `test: true` and no payment data, so your existing handler receives it —
+guard with `hasPaymentData()` as shown above and answer 2xx.
+
+Three things worth knowing before you build a "test my webhook" button on this:
+
+- **`testWebhook()` returning normally means the delivery was queued, not that
+  it arrived.** Deliveries are dispatched by a scheduled job, so the test lands
+  at your endpoint some time later — and can still fail there. Whether the
+  webhook works is answered at the receiving end, by observing the delivery.
+- **Both calls are merchant-level**, so `listWebhooks()` doubles as the cheapest
+  probe of whether a key can manage webhooks at all — an empty list is a
+  perfectly successful answer, while a key restricted to a single store is
+  refused with HTTP 403 (`AuthException`). **The refusal does not say why**: the
+  same 403 covers a store-scoped key, a revoked key, an unknown key, a
+  publishable key and an inactive merchant. Show the server's message rather
+  than guessing the cause.
+- **`listWebhooks()` returns one page.** Compare the page against `totalCount`
+  and page with `skip` before concluding that a URL is not registered.
 
 ### Plain PHP
 
@@ -266,7 +320,7 @@ Every error extends `GoBTCPay\PosApiSdk\Exception\GoBTCPayException`:
 | `ApiException`              | Any API error envelope / non-2xx (`->httpStatus`, `->body`, `->requestId`, `->type()`). Base for the ones below. |
 | `AuthException`             | 401 / 403 — key missing, malformed, revoked, not permitted. |
 | `ValidationException`       | 400 / 402 — request rejected; retrying unchanged won't help. |
-| `NotFoundException`         | 404 — no such payment.                                   |
+| `NotFoundException`         | 404 — no such payment or webhook endpoint.               |
 | `RateLimitException`        | 429 — too many requests (`->retryAfterMs`).              |
 | `ServerException`           | 5xx — the API failed; safe to retry idempotent calls.    |
 | `NetworkException`          | No response: connection / DNS / TLS / timeout (`->isTimeout`). |

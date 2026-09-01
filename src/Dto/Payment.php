@@ -46,6 +46,28 @@ final class Payment
         public readonly mixed $metadata = null,
         /** Absolute link to the hosted checkout page for this payment. */
         public readonly ?string $checkoutUrl = null,
+        /**
+         * When the payment settled, in unix seconds; null while it has not.
+         *
+         * The payment's own settlement time, not the block time of any single
+         * transaction. Absent from an older server's payload, which reads the
+         * same as "not yet paid".
+         *
+         * Typed as an integer, unlike {@see $expiresAt}: the contract declares
+         * it as unix seconds, and a string would only push the cast onto every
+         * caller.
+         */
+        public readonly ?int $paidAt = null,
+        /**
+         * On-chain receipts observed for this payment, freshest first.
+         *
+         * Empty when nothing has been seen yet, and empty on a server older
+         * than the field — an empty list is therefore not evidence that no
+         * funds arrived.
+         *
+         * @var list<PaymentTransaction>
+         */
+        public readonly array $transactions = [],
     ) {
     }
 
@@ -82,7 +104,34 @@ final class Payment
             expiresAt: self::nullableIntString($data['expiresAt'] ?? null),
             metadata: $data['metadata'] ?? null,
             checkoutUrl: self::nullableString($data['checkoutUrl'] ?? null),
+            paidAt: self::nullableInt($data['paidAt'] ?? null),
+            transactions: self::transactions($data['transactions'] ?? null),
         );
+    }
+
+    /**
+     * @return list<PaymentTransaction>
+     */
+    private static function transactions(mixed $value): array
+    {
+        if (!is_array($value)) {
+            return [];
+        }
+
+        $transactions = [];
+        foreach ($value as $entry) {
+            if (is_array($entry)) {
+                /** @var array<string, mixed> $entry */
+                $transactions[] = PaymentTransaction::fromArray($entry);
+            }
+        }
+
+        return $transactions;
+    }
+
+    private static function nullableInt(mixed $value): ?int
+    {
+        return $value === null ? null : (int) $value;
     }
 
     private static function nullableString(mixed $value): ?string

@@ -150,4 +150,56 @@ final class Responses
             'posTerminalLocation' => null,
         ];
     }
+
+    /**
+     * A representative on-chain receipt as returned inside `transactions[]`.
+     *
+     * Satoshi amounts are canonical decimal strings on the wire, exactly as the
+     * API sends them — that is the shape the DTO has to survive.
+     *
+     * @return array<string, mixed>
+     */
+    public static function onchainTransaction(bool $confirmed = true): array
+    {
+        return [
+            'txid' => 'a1b2c3',
+            'amountSats' => '15000',
+            'blockHeight' => $confirmed ? 870_000 : null,
+            'blockTime' => $confirmed ? 1_700_000_500 : null,
+            // `0`, not null, while it is in the mempool: null is reserved for
+            // "the chain tip is unknown", which only happens once it IS in a
+            // block. See `computeConfirmations` on the backend.
+            'confirmations' => $confirmed ? 3 : 0,
+            'feeSats' => $confirmed ? '250' : null,
+        ];
+    }
+
+    /**
+     * A representative webhook endpoint row as returned by `webhook.list`.
+     *
+     * @return array<string, mixed>
+     */
+    public static function webhookEndpoint(
+        string $id = 'wh_1',
+        string $status = 'active',
+        string $scopeType = 'merchant',
+    ): array {
+        $scope = match ($scopeType) {
+            'store' => ['type' => 'store', 'storeId' => 'store_1'],
+            'pos' => ['type' => 'pos', 'posTerminalId' => 'term_1'],
+            default => ['type' => 'merchant'],
+        };
+
+        return [
+            'id' => $id,
+            'merchantId' => 'm_1',
+            'url' => 'https://shop.example.com/?wc-api=gobtcpay',
+            'scope' => $scope,
+            'events' => ['payment.status.updated'],
+            'status' => $status,
+            'label' => 'WooCommerce',
+            'createdAt' => 1_700_000_000,
+            'updatedAt' => 1_700_000_100,
+        ];
+    }
 }

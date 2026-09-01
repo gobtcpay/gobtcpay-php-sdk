@@ -349,14 +349,89 @@ don't put it in a URL. Need a different version or environment? Override
 
 ## Publishing
 
-The `release` GitHub Actions job runs
-[semantic-release](https://semantic-release.gitbook.io/) on the default
-branch and creates a GitHub release + tag from Conventional Commits.
+### How it works
+
+1. A merge into `main` triggers the `lint`, `phpstan`, and `test` GitHub
+   Actions jobs.
+2. If they pass, the `release` job runs
+   [semantic-release](https://semantic-release.gitbook.io/), which reads the
+   [Conventional Commits](https://www.conventionalcommits.org/) since the
+   last release: `fix:` bumps a patch version, `feat:` bumps minor, a
+   `BREAKING CHANGE:` footer bumps major. Anything else (`docs:`, `chore:`,
+   `ci:`, …) does not trigger a release.
+3. On a release, semantic-release updates `CHANGELOG.md`, bumps
+   `SDK_VERSION` in `src/GoBTCPay.php` / `src/GoBTCPayServer.php`, commits
+   `chore(release): x.y.z [skip ci]`, tags it, and creates a GitHub release.
+4. That push fires a GitHub webhook (**Settings → Webhooks**, configured on
+   this repo) that pings `https://packagist.org/api/github`. Packagist
+   re-reads the tag from GitHub and publishes it as a new version — no
+   manual "Update" click, no separate publish step.
 
 Distribution is through the public [Packagist](https://packagist.org/)
-(`gobtcpay/php-merchant-sdk`), backed by a GitHub webhook that Packagist sets
-up automatically once the repository is connected — every new release tag
-becomes an installable version with no extra publish step.
+package `gobtcpay/php-merchant-sdk`.
+
+### Giving this to a merchant
+
+Nothing special — it's a public Composer package like any other. Point them
+at this repo or the [Packagist page](https://packagist.org/packages/gobtcpay/php-merchant-sdk);
+they run `composer require gobtcpay/php-merchant-sdk` in their own project and
+follow [Installation](#installation) / [Quick start](#quick-start). No token,
+no invite, no access request. Their `apiKey` / `sk_live_…` credentials are
+issued separately and are unrelated to installing the package.
+
+**Exception — WordPress/WooCommerce/Shopify plugins:** those merchants
+typically don't run Composer at all, and bundling this SDK's dependencies
+(Guzzle, PSR interfaces) as-is risks class name collisions with other
+plugins on the same site. A plugin that embeds this SDK should vendor it at
+build time with a namespace-prefixing tool
+([php-scoper](https://github.com/humbug/php-scoper) or
+[Strauss](https://github.com/BrianHenryIE/strauss)) and ship the prefixed
+code inside the plugin's own zip — the merchant never touches Composer or
+this package directly.
+
+<details>
+<summary>По-русски</summary>
+
+**Как это работает.**
+
+1. Мерж в `main` запускает джобы `lint`, `phpstan`, `test` в GitHub Actions.
+2. Если они прошли — джоба `release` запускает
+   [semantic-release](https://semantic-release.gitbook.io/), которая читает
+   [Conventional Commits](https://www.conventionalcommits.org/) с прошлого
+   релиза: `fix:` поднимает patch-версию, `feat:` — minor, футер
+   `BREAKING CHANGE:` — major. Остальное (`docs:`, `chore:`, `ci:` и т.п.)
+   релиз не создаёт.
+3. При релизе semantic-release обновляет `CHANGELOG.md`, поднимает
+   `SDK_VERSION` в `src/GoBTCPay.php` / `src/GoBTCPayServer.php`, коммитит
+   `chore(release): x.y.z [skip ci]`, ставит тег и создаёт GitHub release.
+4. Этот пуш триггерит GitHub webhook (настроен в **Settings → Webhooks**
+   этого репозитория), который стучится в `https://packagist.org/api/github`.
+   Packagist сам подтягивает новый тег с GitHub и публикует версию — без
+   ручного нажатия Update, без отдельного шага публикации.
+
+Дистрибуция — через публичный [Packagist](https://packagist.org/), пакет
+`gobtcpay/php-merchant-sdk`.
+
+**Как передать этот пакет мерчанту.** Ничего особенного делать не нужно —
+это обычный публичный Composer-пакет. Дайте ссылку на этот репозиторий или
+на [страницу пакета на Packagist](https://packagist.org/packages/gobtcpay/php-merchant-sdk);
+у себя в проекте мерчант просто выполняет
+`composer require gobtcpay/php-merchant-sdk` и дальше следует разделам
+[Installation](#installation) / [Quick start](#quick-start). Токен, приглашение
+или согласование доступа не требуются. Ключи `apiKey` / `sk_live_…` выдаются
+отдельно и никак не связаны с установкой пакета.
+
+**Исключение — плагины для WordPress/WooCommerce/Shopify.** Такие мерчанты
+обычно вообще не используют Composer, а прямое встраивание зависимостей SDK
+(Guzzle, PSR-интерфейсы) рискует конфликтом имён классов с другими плагинами
+на том же сайте. Плагин, встраивающий этот SDK, должен вендорить его на
+этапе сборки инструментом с префиксацией неймспейсов
+([php-scoper](https://github.com/humbug/php-scoper) или
+[Strauss](https://github.com/BrianHenryIE/strauss)) и поставлять уже
+префиксированный код внутри zip-архива плагина — мерчант напрямую с
+Composer или этим пакетом не взаимодействует.
+
+</details>
 
 ## License
 

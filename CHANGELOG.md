@@ -1,3 +1,10 @@
+# [1.1.0](https://github.com/gobtcpay/gobtcpay-php-sdk/compare/v1.0.1...v1.1.0) (2026-10-19)
+
+
+### Features
+
+* **webhooks:** add createWebhook and findWebhookByUrl to the server client ([344933c](https://github.com/gobtcpay/gobtcpay-php-sdk/commit/344933ce4961c13c2b1169c93a94d4dcb06b2629))
+
 ## [1.0.1](https://github.com/gobtcpay/gobtcpay-php-sdk/compare/v1.0.0...v1.0.1) (2026-09-01)
 
 

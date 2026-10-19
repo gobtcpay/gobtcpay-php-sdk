@@ -183,6 +183,7 @@ final class Responses
         string $id = 'wh_1',
         string $status = 'active',
         string $scopeType = 'merchant',
+        string $url = 'https://shop.example.com/?wc-api=gobtcpay',
     ): array {
         $scope = match ($scopeType) {
             'store' => ['type' => 'store', 'storeId' => 'store_1'],
@@ -193,7 +194,7 @@ final class Responses
         return [
             'id' => $id,
             'merchantId' => 'm_1',
-            'url' => 'https://shop.example.com/?wc-api=gobtcpay',
+            'url' => $url,
             'scope' => $scope,
             'events' => ['payment.status.updated'],
             'status' => $status,
@@ -201,5 +202,60 @@ final class Responses
             'createdAt' => 1_700_000_000,
             'updatedAt' => 1_700_000_100,
         ];
+    }
+
+    /**
+     * The `webhook` object of a `webhook.create` response: an endpoint row plus
+     * the signing secret, which the platform returns on creation only.
+     *
+     * @return array<string, mixed>
+     */
+    public static function createdWebhook(
+        string $signingSecret = 'whsec_created_once',
+        string $scopeType = 'merchant',
+        string $url = 'https://shop.example.com/?wc-api=gobtcpay',
+    ): array {
+        return self::webhookEndpoint(scopeType: $scopeType, url: $url) + ['signingSecret' => $signingSecret];
+    }
+
+    /**
+     * `$count` endpoint rows whose URLs are `https://shop.example.com/hook/{page}-{index}`,
+     * so no two rows collide and none equals a URL a test searches for by accident.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public static function webhookRows(int $count, int $page = 0): array
+    {
+        $rows = [];
+        for ($i = 0; $i < $count; $i++) {
+            $rows[] = self::webhookEndpoint(
+                id: "wh_{$page}_{$i}",
+                url: "https://shop.example.com/hook/{$page}-{$i}",
+            );
+        }
+
+        return $rows;
+    }
+
+    /**
+     * A successful `webhook.list` response holding `$count` generated rows.
+     *
+     * `$totalCount` is what the server *claims* — a test can set it to a value
+     * that disagrees with the page, because the server computes it separately.
+     *
+     * @param array<string, mixed>|null $lastRow Replaces the last generated row, e.g. the endpoint a search is looking for.
+     */
+    public static function webhookPage(
+        int $count,
+        int $page = 0,
+        ?int $totalCount = null,
+        ?array $lastRow = null,
+    ): ResponseInterface {
+        $rows = self::webhookRows($count, $page);
+        if ($lastRow !== null && $rows !== []) {
+            $rows[array_key_last($rows)] = $lastRow;
+        }
+
+        return self::success(['items' => $rows, 'totalCount' => $totalCount ?? $count]);
     }
 }

@@ -224,4 +224,58 @@ final class WebhookHandlerTest extends TestCase
         self::assertTrue($event->hasPaymentData());
         self::assertSame('pay_1', $event->payment()->paymentId);
     }
+
+    /**
+     * Requirement "PHP-SDK не выдаёт платёж за тестовой доставкой": the
+     * predicate answers, on the very events the handler hands out, whether a
+     * payment is there — false for a test delivery, true for a payment one —
+     * and asking for the payment where there is none raises instead of
+     * returning an empty or invented one.
+     */
+    public function testPredicateAndAccessorAgreeOnTestAndPaymentDeliveries(): void
+    {
+        $handler = new WebhookHandler(self::SECRET, toleranceSeconds: 0);
+
+        $testBody = $this->testDeliveryBody();
+        $test = $handler->constructEvent($testBody, $this->header($testBody));
+
+        $paymentBody = $this->body();
+        $payment = $handler->constructEvent($paymentBody, $this->header($paymentBody));
+
+        self::assertFalse($test->hasPaymentData());
+        self::assertTrue($payment->hasPaymentData());
+
+        try {
+            $test->payment();
+            self::fail('payment() on a test delivery must raise');
+        } catch (GoBTCPayException $e) {
+            self::assertStringContainsString('no payment', $e->getMessage());
+        }
+
+        self::assertSame('pay_1', $payment->payment()->paymentId);
+    }
+
+    /**
+     * The guard is about the absence of a payment, not about the `test` flag:
+     * a delivery that is not marked as a test but still has `data: null` has
+     * no payment either, and must not yield an empty one.
+     */
+    public function testADeliveryWithNullDataCarriesNoPaymentWhateverItsFlag(): void
+    {
+        $handler = new WebhookHandler(self::SECRET);
+        $body = json_encode([
+            'eventId' => 'evt_nodata',
+            'type' => WebhookEvent::TYPE_PAYMENT_STATUS_UPDATED,
+            'createdAt' => 1_700_000_000,
+            'data' => null,
+        ], JSON_THROW_ON_ERROR);
+
+        $event = $handler->constructEvent($body, $this->header($body));
+
+        self::assertFalse($event->test);
+        self::assertFalse($event->hasPaymentData());
+
+        $this->expectException(GoBTCPayException::class);
+        $event->payment();
+    }
 }

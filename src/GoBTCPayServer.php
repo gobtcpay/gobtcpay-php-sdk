@@ -9,7 +9,11 @@ use GoBTCPay\PosApiSdk\Dto\Payment;
 use GoBTCPay\PosApiSdk\Dto\PaymentListItem;
 use GoBTCPay\PosApiSdk\Dto\PaymentStatus;
 use GoBTCPay\PosApiSdk\Dto\WebhookEndpoint;
+use GoBTCPay\PosApiSdk\Dto\WebhookEndpointWithSecret;
+use GoBTCPay\PosApiSdk\Dto\WebhookScope;
 use GoBTCPay\PosApiSdk\Exception\GoBTCPayException;
+use GoBTCPay\PosApiSdk\Exception\WebhookSearchLimitException;
+use InvalidArgumentException;
 use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestFactoryInterface;
 use Psr\Http\Message\StreamFactoryInterface;
@@ -37,6 +41,12 @@ final class GoBTCPayServer
     private const DEFAULT_MAX_RETRIES = 2;
     private const DEFAULT_PAGE_SIZE = 50;
     private const MAX_PAGE_SIZE = 100;
+
+    /** Page size of {@see findWebhookByUrl}. */
+    private const WEBHOOK_SEARCH_PAGE_SIZE = 100;
+
+    /** Pages {@see findWebhookByUrl} reads before giving up: 20 x 100 = 2000 endpoints. */
+    private const WEBHOOK_SEARCH_MAX_PAGES = 20;
 
     private const SECRET_KEY_PREFIX = 'sk_live_';
     private const PUBLISHABLE_KEY_PREFIX = 'pk_live_';
@@ -245,6 +255,109 @@ final class GoBTCPayServer
     }
 
     /**
+     * Register a webhook endpoint for the merchant.
+     *
+     * Meant for a shop integration that connects itself: it knows its own
+     * handler URL and holds the merchant secret key, and nobody has to open the
+     * dashboard. Without `$scope` the endpoint is registered merchant-wide,
+     * which is what an onboarding flow wants — it has no store id to hand.
+     *
+     * **The signing secret is returned here and only here.** Save
+     * {@see WebhookEndpointWithSecret::$signingSecret} immediately: a listing or
+     * a lookup never contains it, and it cannot be read back later. Rotating the
+     * secret is the only way to obtain a new one after creation, and it
+     * invalidates the previous one at once.
+     *
+     * **Not retried.** There is no idempotency key for this call, so a repeat
+     * after a timeout or a dropped connection could register a second endpoint.
+     * After a {@see \GoBTCPay\PosApiSdk\Exception\NetworkException} the outcome
+     * is unknown: look the endpoint up with {@see findWebhookByUrl} before
+     * deciding to create again.
+     *
+     * **Duplicates are not prevented.** The platform neither checks the URL
+     * against existing endpoints nor limits how many a merchant may have. "Find
+     * by URL, then create" is two requests with nothing atomic between them: two
+     * processes connecting the same shop at once will both find nothing and both
+     * create, leaving two endpoints with one URL. Preventing that — a lock held
+     * for the duration of the connection, say — is the caller's job.
+     *
+     * **A rejected URL** raises {@see \GoBTCPay\PosApiSdk\Exception\ValidationException}
+     * when the platform refuses it (not `https`, a private-network host, …).
+     * The machine-readable reason, a `webhook_url_*` code, comes through
+     * unchanged in {@see \GoBTCPay\PosApiSdk\Exception\ApiException::type()}.
+     *
+     * Refused for a store-scoped API key, like every webhook management call —
+     * with the same undifferentiated 403 as {@see listWebhooks}. **A refusal does
+     * not say why**: the platform answers HTTP 403
+     * ({@see \GoBTCPay\PosApiSdk\Exception\AuthException}) with the same
+     * `permission_error` for a store-scoped key, a revoked key, an unknown key, a
+     * publishable key and an inactive merchant, and there is no machine-readable
+     * marker that tells them apart. The messages differ, but the message text is
+     * not part of the contract: show it to a person, never branch on it.
+     *
+     * The key's restriction and the endpoint's `$scope` are two different
+     * things. `$scope` only filters which deliveries reach the endpoint and has
+     * nothing to do with what the key may do.
+     *
+     * Deliveries of type `payment.status.updated` are verified on the receiving
+     * side with {@see webhooks}.
+     *
+     * @param string $url Absolute URL the platform will deliver to.
+     * @param WebhookScope|null $scope What the endpoint receives deliveries for.
+     *                                 Null means the whole merchant.
+     * @param list<string>|null $events Event types to subscribe to; null leaves the platform default.
+     * @param string|null $label Free-form label shown next to the endpoint; null for none.
+     *
+     * @throws InvalidArgumentException If `$scope` is a store scope without `storeId`, or a POS scope without `posTerminalId`. Thrown before any request is made.
+     * @throws \GoBTCPay\PosApiSdk\Exception\ApiException If the platform rejects the request.
+     * @throws GoBTCPayException If the platform answers without an endpoint.
+     */
+    public function createWebhook(
+        string $url,
+        ?WebhookScope $scope = null,
+        ?array $events = null,
+        ?string $label = null,
+    ): WebhookEndpointWithSecret {
+        $scope ??= new WebhookScope(WebhookScope::TYPE_MERCHANT);
+
+        // Refuse an incomplete scope before any request is made: a store scope
+        // without its store, or a POS scope without its terminal, names nothing.
+        $scopeBody = ['type' => $scope->type];
+        if ($scope->type === WebhookScope::TYPE_STORE) {
+            if ($scope->storeId === null) {
+                throw new InvalidArgumentException('A webhook scope of type "store" requires a storeId');
+            }
+            $scopeBody['storeId'] = $scope->storeId;
+        } elseif ($scope->type === WebhookScope::TYPE_POS) {
+            if ($scope->posTerminalId === null) {
+                throw new InvalidArgumentException('A webhook scope of type "pos" requires a posTerminalId');
+            }
+            $scopeBody['posTerminalId'] = $scope->posTerminalId;
+        }
+
+        $optional = array_filter(
+            ['events' => $events, 'label' => $label],
+            static fn (mixed $v): bool => $v !== null,
+        );
+
+        // Not retried: there is no idempotency key for this call, and a repeat
+        // after a timeout could register a second endpoint for the same URL.
+        $response = $this->transport->post(
+            '/merchant/webhook/create',
+            ['url' => $url, 'scope' => $scopeBody] + $optional,
+            retry: false,
+        );
+
+        $webhook = $response['webhook'] ?? null;
+        if (!is_array($webhook)) {
+            throw new GoBTCPayException('The platform did not return the created webhook endpoint');
+        }
+
+        /** @var array<string, mixed> $webhook */
+        return WebhookEndpointWithSecret::fromArray($webhook);
+    }
+
+    /**
      * List the merchant's configured webhook endpoints.
      *
      * Read-only, and an empty list is a perfectly successful answer: a merchant
@@ -265,6 +378,7 @@ final class GoBTCPayServer
      * a missing entry may simply be on the next page.
      *
      * @param string|null $status Filter by `WebhookEndpoint::STATUS_*`; null for both.
+     * @param int $limit Page size, clamped to 1..100.
      *
      * @return array{items: list<WebhookEndpoint>, totalCount: int}
      */
@@ -282,7 +396,7 @@ final class GoBTCPayServer
             '/merchant/webhook/list',
             [
                 'pagination' => [
-                    'limit' => min($limit, self::MAX_PAGE_SIZE),
+                    'limit' => self::clampPageSize($limit),
                     'skip' => $skip,
                 ],
                 'filters' => (object) $filters,
@@ -302,6 +416,76 @@ final class GoBTCPayServer
             'items' => $items,
             'totalCount' => (int) ($response['totalCount'] ?? 0),
         ];
+    }
+
+    /**
+     * Find the merchant's webhook endpoint registered on exactly this URL.
+     *
+     * Pages through {@see listWebhooks} itself, 100 endpoints at a time and at
+     * most 20 pages — **2000 endpoints at most**. The limit is finite on purpose
+     * so a misbehaving server can never keep the loop running forever. The URL
+     * is compared for exact equality, not normalised.
+     *
+     * There are three outcomes, and they are different answers:
+     *
+     * - an endpoint — it was found;
+     * - `null` — the listing ended (a page came back short) and the URL is not
+     *   in it: **no such URL is registered**;
+     * - {@see WebhookSearchLimitException} — the limit was reached and the last
+     *   page was still full: **the answer is unknown**, because the endpoints
+     *   past the limit were never read. Do not treat this as `null` and create:
+     *   that is how one URL ends up registered twice.
+     *
+     * The search stops on the length of a page, not on `totalCount`. The server
+     * computes the total in a separate query, and trusting an understated one
+     * would end the search early with a false "not found" — the outcome after
+     * which a caller creates a second endpoint. The reported total is used only
+     * in the exception message.
+     *
+     * **"Find, then create" is not atomic.** It is two requests, and two
+     * processes connecting the same shop at once will both find nothing and
+     * both call {@see createWebhook}, leaving two endpoints with one URL. The
+     * caller is responsible for idempotency — for example a lock held while a
+     * shop is being connected.
+     *
+     * Merchant-level, so refused for a store-scoped API key with the same
+     * undifferentiated 403 as {@see listWebhooks}: the refusal does not say why
+     * (store-scoped, revoked, unknown or publishable key, inactive merchant),
+     * and there is no machine-readable marker that tells these apart. Show the
+     * message, never branch on it.
+     *
+     * @throws WebhookSearchLimitException If 20 pages were read, the last one still full, and the URL did not turn up.
+     * @throws \GoBTCPay\PosApiSdk\Exception\ApiException If a listing request fails.
+     */
+    public function findWebhookByUrl(string $url): ?WebhookEndpoint
+    {
+        $scanned = 0;
+        $totalCount = 0;
+
+        for ($page = 0; $page < self::WEBHOOK_SEARCH_MAX_PAGES; $page++) {
+            $result = $this->listWebhooks(
+                null,
+                self::WEBHOOK_SEARCH_PAGE_SIZE,
+                $page * self::WEBHOOK_SEARCH_PAGE_SIZE,
+            );
+
+            foreach ($result['items'] as $item) {
+                if (hash_equals($url, $item->url)) {
+                    return $item;
+                }
+            }
+
+            $scanned += count($result['items']);
+            $totalCount = $result['totalCount'];
+
+            // A short page, empty included, means the listing ended. The
+            // server's totalCount is deliberately not consulted: see the docblock.
+            if (count($result['items']) < self::WEBHOOK_SEARCH_PAGE_SIZE) {
+                return null;
+            }
+        }
+
+        throw new WebhookSearchLimitException(self::WEBHOOK_SEARCH_MAX_PAGES, $scanned, $totalCount);
     }
 
     /**
@@ -345,5 +529,11 @@ final class GoBTCPayServer
         int $dedupeCacheSize = 1000,
     ): WebhookHandler {
         return new WebhookHandler($signingSecret, $toleranceSeconds, $dedupeCacheSize);
+    }
+
+    /** Clamp a requested page size to the range the platform accepts: 1..{@see MAX_PAGE_SIZE}. */
+    private static function clampPageSize(int $limit): int
+    {
+        return max(1, min($limit, self::MAX_PAGE_SIZE));
     }
 }

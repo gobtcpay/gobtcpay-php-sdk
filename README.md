@@ -141,7 +141,9 @@ $gobtcpay->cancelPayment(paymentId): Payment;
 $gobtcpay->listPayments(status?, externalId?, dateRange?, limit?): Generator<PaymentListItem>;
 $gobtcpay->listPaymentsPage(status?, externalId?, dateRange?, limit?, skip?): array{items: PaymentListItem[], totalCount: int};
 $gobtcpay->watchPayment([...]): PaymentPoller;
+$gobtcpay->createWebhook(url, scope?, events?, label?): WebhookEndpointWithSecret;
 $gobtcpay->listWebhooks(status?, limit?, skip?): array{items: WebhookEndpoint[], totalCount: int};
+$gobtcpay->findWebhookByUrl(url): ?WebhookEndpoint;
 $gobtcpay->testWebhook(webhookId): void;
 $gobtcpay->webhooks(signingSecret, toleranceSeconds?, dedupeCacheSize?): WebhookHandler;
 ```
@@ -195,8 +197,12 @@ Options (array keys): `paymentId` (required), `intervalMs`, `timeoutMs`,
 
 ## Webhooks
 
-Register a webhook URL in the merchant dashboard to receive
-`payment.status.updated` events. The handler verifies the `X-GoBTCPay-Signature`
+Register a webhook URL in the merchant dashboard — or from the SDK, see
+[Registering an endpoint from the SDK](#registering-an-endpoint-from-the-sdk) —
+to receive `payment.status.updated` events. The handler below is for
+**incoming** deliveries; managing the registrations themselves is
+[Inspecting and testing endpoints](#inspecting-and-testing-endpoints) and the
+sections after it. The handler verifies the `X-GoBTCPay-Signature`
 header (`t={timestamp},v1={hmac_hex}`), enforces a replay window, and
 de-duplicates on `eventId`.
 
@@ -256,7 +262,95 @@ Three things worth knowing before you build a "test my webhook" button on this:
   publishable key and an inactive merchant. Show the server's message rather
   than guessing the cause.
 - **`listWebhooks()` returns one page.** Compare the page against `totalCount`
-  and page with `skip` before concluding that a URL is not registered.
+  and page with `skip` before concluding that a URL is not registered — or use
+  [`findWebhookByUrl()`](#finding-an-endpoint-by-url), which does the paging.
+
+### Registering an endpoint from the SDK
+
+`createWebhook()` registers an endpoint with the merchant secret key, without
+opening the dashboard — the call a shop integration makes to connect itself.
+Without a scope the endpoint is registered merchant-wide:
+
+```php
+use GoBTCPay\PosApiSdk\Dto\WebhookScope;
+
+$endpoint = $gobtcpay->createWebhook(url: 'https://shop.example.com/webhooks/gobtcpay');
+
+// Save the secret right now — this is the only time it is returned.
+$settings->save('gobtcpay_webhook_secret', $endpoint->signingSecret);
+
+// Then verify incoming deliveries with it:
+$webhooks = $gobtcpay->webhooks($endpoint->signingSecret);
+
+// Optional: narrow what the endpoint receives, subscribe, label.
+$gobtcpay->createWebhook(
+    url: 'https://shop.example.com/webhooks/gobtcpay',
+    scope: new WebhookScope(WebhookScope::TYPE_STORE, storeId: $storeId),
+    events: ['payment.status.updated'],
+    label: 'Main shop',
+);
+```
+
+`scope` selects which deliveries reach the endpoint (the whole merchant, one
+store or one POS terminal). It is unrelated to what the API key may do.
+
+- **`signingSecret` is returned once.** It exists only on the result of
+  `createWebhook()` (`WebhookEndpointWithSecret`); a listing or a lookup returns
+  a plain `WebhookEndpoint` without it, and it cannot be read back. **Rotation
+  is the only way to get a new secret after creation, and it invalidates the
+  previous one at once.** `toEndpoint()` gives the same endpoint without the
+  secret where a plain `WebhookEndpoint` is expected.
+- **`createWebhook()` is never retried.** There is no idempotency key, so a
+  repeat after a timeout could create a second endpoint. After a
+  `NetworkException` the outcome is unknown: look the URL up with
+  `findWebhookByUrl()` before deciding to create again.
+- **A rejected URL** (not `https`, a private-network host, …) throws
+  `ValidationException`; the platform's `webhook_url_*` code is available
+  unchanged from `$e->type()`.
+- **A key restricted to a single store is refused** with HTTP 403
+  (`AuthException`). There is no machine-readable marker in the contract by
+  which this refusal could be told apart from a revoked or unknown key: such
+  refusals differ only in the message text, and that text is not declared by the
+  contract — so you may show it to the user, but you must not branch logic on
+  it.
+- **Idempotency of connecting a shop is the caller's job.** The platform does
+  not check URLs for duplicates and does not limit the number of endpoints.
+  "Find, then create" is two requests with nothing atomic between them: two
+  processes connecting the same shop at once will both find nothing and both
+  create, leaving two endpoints with one URL. Hold your own lock for the
+  duration of the connection.
+
+### Finding an endpoint by URL
+
+`findWebhookByUrl()` pages through the listing itself and returns the endpoint
+registered on exactly that URL:
+
+```php
+use GoBTCPay\PosApiSdk\Exception\WebhookSearchLimitException;
+
+try {
+    $endpoint = $gobtcpay->findWebhookByUrl($url);
+} catch (WebhookSearchLimitException $e) {
+    // Unknown, not "absent": do NOT create here. Report it and stop.
+    error_log($e->getMessage());
+    return;
+}
+
+if ($endpoint === null) {
+    $endpoint = $gobtcpay->createWebhook(url: $url);   // under your own lock
+}
+```
+
+- **The search is bounded: 20 pages of 100, that is 2000 endpoints.**
+- **Three outcomes.** An endpoint — found. `null` — the listing ended and no
+  such URL is registered. `WebhookSearchLimitException` — the limit was reached
+  with the last page still full, so the answer is unknown (`->pagesScanned`,
+  `->scannedCount`, `->totalCount`). Treating the exception as "not found" and
+  creating is how one URL ends up registered twice.
+- The search stops on the length of a page, not on the server's `totalCount`,
+  which is computed separately and can be understated.
+- Like `createWebhook()`, it is refused for a key restricted to a single store,
+  with the same undifferentiated 403.
 
 ### Plain PHP
 
@@ -325,6 +419,7 @@ Every error extends `GoBTCPay\PosApiSdk\Exception\GoBTCPayException`:
 | `ServerException`           | 5xx — the API failed; safe to retry idempotent calls.    |
 | `NetworkException`          | No response: connection / DNS / TLS / timeout (`->isTimeout`). |
 | `WebhookSignatureException` | A webhook signature failed verification.                 |
+| `WebhookSearchLimitException` | `findWebhookByUrl()` reached its 2000-endpoint limit without finding the URL — the answer is unknown, not "absent" (`->pagesScanned`, `->scannedCount`, `->totalCount`). |
 
 ```php
 use GoBTCPay\PosApiSdk\Exception\ApiException;
